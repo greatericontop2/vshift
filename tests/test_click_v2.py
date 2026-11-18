@@ -99,3 +99,10 @@ def test_right_only_warns_on_left_mapping(tmp_path, caplog, monkeypatch):
     with caplog.at_level(logging.WARNING, logger="vshift"), pytest.raises(SystemExit):
         app.main(["-c", str(f), "--simulate"])
     assert "shift_up_left" in caplog.text and "right_only" in caplog.text
+
+
+def test_speed_units_validated(tmp_path):
+    f = tmp_path / "c.yaml"
+    f.write_text("display: {speed_units: furlongs}\n")
+    with pytest.raises(ValueError):
+        config.load(str(f))

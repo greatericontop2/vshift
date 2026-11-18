@@ -56,7 +56,13 @@ DEFAULTS = {
     },
     "erg": {"start_watts": 200, "step_watts": 5},
     "grade": {"start_pct": 0.0, "step_pct": 0.5},
-    "display": {"power_avg_s": 3, "font_size": 48},
+    "display": {
+        "power_avg_s": 3,
+        "font_size": 72,         # watts; gear/cadence/speed row is half this
+        "speed_units": "kmh",    # kmh | mph
+        "front_ring_teeth": 0,   # e.g. 50 shows "(50/23.6)" next to the gear; 0 = off
+        "fullscreen": False,     # F11 toggles at runtime
+    },
 }
 
 
@@ -98,6 +104,8 @@ def load(path: str | None) -> dict:
         raise ValueError("trainer.mode must be auto, native or ftms_erg")
     if cfg["cadence"]["source"] not in ("trainer", "sensor", "derived"):
         raise ValueError("cadence.source must be trainer, sensor or derived")
+    if cfg["display"]["speed_units"] not in ("kmh", "mph"):
+        raise ValueError("display.speed_units must be kmh or mph")
     c = cfg["controllers"]
     if c["click_v2_mode"] not in CLICK_V2_MODES:
         raise ValueError("controllers.click_v2_mode must be one of " + ", ".join(CLICK_V2_MODES))

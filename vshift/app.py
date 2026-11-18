@@ -16,7 +16,8 @@ from .core import Session
 log = logging.getLogger("vshift")
 
 KEYS_HELP = ("Up/k: harder   Down/j: easier   e: ERG on/off   +/-: ERG watts   "
-             "PgUp/PgDn: grade   q: quit")
+             "PgUp/PgDn: grade   F11: fullscreen   q: quit")
+KMH_PER_MPH = 1.609344
 
 
 class QueueHandler(logging.Handler):
@@ -36,7 +37,8 @@ class Gui:
         big = session.cfg["display"]["font_size"]
         f_big = tkfont.Font(family="DejaVu Sans", size=big, weight="bold")
         f_mid = tkfont.Font(family="DejaVu Sans", size=max(12, big // 2), weight="bold")
-        f_small = tkfont.Font(family="DejaVu Sans Mono", size=10)
+        f_gear_sub = tkfont.Font(family="DejaVu Sans", size=max(10, big * 3 // 10), weight="bold")
+        f_small = tkfont.Font(family="DejaVu Sans Mono", size=max(10, big // 6))
         fg, dim = "#f2f2f2", "#9a9a9a"
 
         def lab(parent, text, f, color=fg, **kw):
@@ -55,7 +57,10 @@ class Gui:
         self.cad = lab(row, "-- rpm", f_mid)
         self.cad.pack(side="left")
         self.gear = lab(row, "", f_mid, "#7fd3ff")
-        self.gear.pack(side="left", padx=28)
+        self.gear.pack(side="left", padx=(28, 0))
+        # Ratio and chainring/cog equivalent, in smaller text on the same baseline
+        self.gear_sub = lab(row, "", f_gear_sub, "#7fd3ff")
+        self.gear_sub.pack(side="left", padx=(10, 28), anchor="s", pady=(0, big // 18))
         self.speed = lab(row, "", f_mid, dim)
         self.speed.pack(side="left")
 
@@ -77,6 +82,9 @@ class Gui:
         for key, (meth, *args) in bind.items():
             root.bind(key, lambda _e, m=meth, a=args: self.call(m, *a))
         root.bind("q", lambda _e: root.destroy())
+        root.bind("<F11>", lambda _e: root.attributes("-fullscreen", not root.attributes("-fullscreen")))
+        if session.cfg["display"]["fullscreen"]:
+            root.attributes("-fullscreen", True)
         self.refresh()
 
     def call(self, meth: str, *args) -> None:
@@ -89,8 +97,19 @@ class Gui:
         self.power_sub.config(text=f"{avg}s avg\nnow {st.power if st.power is not None else '-'} W"
                               + (f"\nHR {st.hr}" if st.hr else ""))
         self.cad.config(text=f"{st.cadence:3.0f} rpm" if st.cadence is not None else "-- rpm")
-        self.gear.config(text=f"gear {st.gear_index + 1}/{st.gear_count}  ({st.ratio:.2f})")
-        self.speed.config(text=f"{st.speed_kmh:4.1f} km/h" if st.speed_kmh is not None else "")
+        disp = self.s.cfg["display"]
+        self.gear.config(text=f"gear {st.gear_index + 1}/{st.gear_count}")
+        sub = f"({st.ratio:.2f})"
+        if disp["front_ring_teeth"]:
+            ring = disp["front_ring_teeth"]
+            sub += f" ({ring}/{ring / st.ratio:.1f})"  # cog teeth that give this ratio
+        self.gear_sub.config(text=sub)
+        if st.speed_kmh is None:
+            self.speed.config(text="")
+        elif disp["speed_units"] == "mph":
+            self.speed.config(text=f"{st.speed_kmh / KMH_PER_MPH:4.1f} mph")
+        else:
+            self.speed.config(text=f"{st.speed_kmh:4.1f} km/h")
         mode = f"ERG {st.erg_watts} W" if st.erg else f"SIM  grade {st.grade_pct:+.1f}%"
         if self.s.emulating and not st.erg and st.emulated_target is not None:
             mode += f"   (emulated target {st.emulated_target} W)"
@@ -166,7 +185,7 @@ def main(argv=None) -> int:
     t = threading.Thread(target=lambda: loop.run_until_complete(worker()), daemon=True)
     t.start()
     root = tk.Tk()
-    root.geometry("760x480")
+    root.geometry("1280x720")
     Gui(root, session, loop, logq)
     root.mainloop()
     return 0

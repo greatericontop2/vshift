@@ -21,8 +21,15 @@ first time.
     vshift -c config.yaml --simulate    # no Bluetooth; rider holds --sim-watts (default 220)
     vshift -c config.yaml -v            # log raw BLE frames
 
-Keys: Up/k harder, Down/j easier, e toggle ERG, +/- ERG watts, PgUp/PgDn grade, q quit.
+Keys: Up/k harder, Down/j easier, e toggle ERG, +/- ERG watts, PgUp/PgDn grade, F11 fullscreen, q quit.
 Click / Ride buttons map through `controllers.shift_up` etc. in the config.
+
+## Display options
+
+`display.font_size` sets the watts size (the cadence/gear/speed row is half of it),
+`display.speed_units` is `kmh` or `mph`, and `display.front_ring_teeth: 50` adds the
+equivalent chainring/cog next to the gear, e.g. `gear 20/42 (2.20) (50/22.7)`.
+`display.fullscreen: true` starts fullscreen (F11 toggles).
 
 ## How shifting works
 
