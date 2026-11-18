@@ -1,0 +1,39 @@
+# vshift config. Anything you leave out falls back to the defaults in vshift/config.py.
+
+trainer:
+  name: "D500"          # substring of the trainer's Bluetooth name (or set address: "AA:BB:...")
+  mode: auto            # auto | native | ftms_erg
+  native_ratio_scale: 1.0
+
+controllers:
+  enabled: true
+  click_v2_unlock: true
+  # Button names: click_plus/click_minus (Click v1); shift_up_left/shift_up_right,
+  # a b y z up down left right (Click v2 / Ride / Play)
+  shift_up: [click_plus, shift_up_right, y, up]
+  shift_down: [click_minus, shift_up_left, z, down]
+  toggle_erg: [a]
+
+cadence_sensor:
+  enabled: false        # true if you add a Bluetooth CSC cadence sensor
+  name: ""
+
+gears:
+  # A constant 3.5% step gives about +/-1.6 rpm worst case at 90 rpm.
+  generate: {start: 1.2, end: 4.8, step_pct: 3.5}
+  # Or write the gears out yourself (easiest first), for example tighter in the middle:
+  # ratios: [1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0,
+  #          3.1, 3.2, 3.35, 3.5, 3.7, 3.9, 4.2, 4.5, 5.0]
+  start_ratio: 2.4
+
+rider: {rider_kg: 75, bike_kg: 9}
+
+cadence:
+  target: 90
+  source: trainer       # trainer | sensor | derived
+  physical_chainring: 50  # only for 'derived': ring the chain sits on, on the Cog
+  physical_cog: 14
+
+erg: {start_watts: 200, step_watts: 5}
+grade: {start_pct: 0.0, step_pct: 0.5}
+display: {power_avg_s: 3, font_size: 48}

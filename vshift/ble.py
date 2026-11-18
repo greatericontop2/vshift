@@ -1,0 +1,359 @@
+"""Bluetooth LE backend (bleak / BlueZ on Linux).
+
+One scanner finds the trainer, Zwift controllers and an optional cadence
+sensor; each device then gets its own connect/reconnect task.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+
+from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
+from bleak.backends.scanner import AdvertisementData
+
+from . import protocol as P
+from .core import Session
+
+log = logging.getLogger("vshift")
+
+CONTROLLER_TYPES = {"click_v1", "click_v2_left", "click_v2_right", "play_left", "play_right",
+                    "play", "ride_left", "ride_right"}
+
+
+def _can_respond(client: BleakClient, uuid: str) -> bool:
+    ch = client.services.get_characteristic(uuid)
+    return ch is not None and "write" in ch.properties
+
+
+async def _write(client: BleakClient, uuid: str, data: bytes) -> None:
+    log.debug("-> %s %s", uuid[4:8], data.hex(" "))
+    await client.write_gatt_char(uuid, data, response=_can_respond(client, uuid))
+
+
+# ===================================================================== trainer
+
+
+class BleTrainer:
+    def __init__(self, session: Session, device: BLEDevice):
+        self.session, self.device = session, device
+        self.client: BleakClient | None = None
+        self.native = False
+        self.has_ftms = False
+        self._rideon = asyncio.Event()
+        self._ftms_lock = asyncio.Lock()
+        self._ftms_reply: asyncio.Future | None = None
+        self._ftms_granted = False
+        self._grade = 0.0
+
+    # ---------- Trainer protocol (called by Session)
+
+    async def set_gear(self, ratio: float) -> None:
+        if self.native:
+            await self._zwift(P.zwift_gear(ratio))
+
+    async def set_grade(self, grade_pct: float) -> None:
+        self._grade = grade_pct
+        if self.native:
+            await self._zwift(P.zwift_simulation(grade_pct, full=True))
+        elif self.has_ftms:
+            await self._ftms(P.ftms_simulation(grade_pct))
+
+    async def set_erg(self, watts: int | None) -> None:
+        if watts is None:
+            return  # Session re-applies gear/grade (sim mode) right after
+        await self.set_power_target(watts)
+
+    async def set_power_target(self, watts: int) -> None:
+        if self.has_ftms:
+            await self._ftms(P.ftms_target_power(watts))
+        elif self.native:
+            await self._zwift(P.zwift_target_power(watts))
+
+    # ---------- writes
+
+    async def _zwift(self, data: bytes) -> None:
+        if self.client and self.client.is_connected:
+            try:
+                await _write(self.client, P.ZWIFT_SYNC_RX, data)
+            except Exception as e:  # noqa: BLE001 - log and carry on, reconnect handles the rest
+                log.warning("trainer zwift write failed: %s", e)
+
+    async def _ftms(self, cmd: bytes) -> None:
+        """FTMS control point is request/response: one command in flight at a time."""
+        if not (self.client and self.client.is_connected):
+            return
+        async with self._ftms_lock:
+            for c in ([P.ftms_request_control(), P.ftms_start()] if not self._ftms_granted else []) + [cmd]:
+                loop = asyncio.get_running_loop()
+                self._ftms_reply = loop.create_future()
+                try:
+                    await _write(self.client, P.FTMS_CONTROL_POINT, c)
+                    res = await asyncio.wait_for(self._ftms_reply, 2.5)
+                except asyncio.TimeoutError:
+                    log.warning("FTMS op 0x%02x: no response", c[0])
+                    continue
+                except Exception as e:  # noqa: BLE001
+                    log.warning("FTMS write failed: %s", e)
+                    return
+                if c[0] == 0x00:
+                    self._ftms_granted = res == 0x01
+                if res != 0x01:
+                    log.warning("FTMS op 0x%02x result %d", c[0], res)
+
+    # ---------- notifications
+
+    def _on_ftms_cp(self, _, data: bytearray) -> None:
+        if len(data) >= 3 and data[0] == 0x80 and self._ftms_reply and not self._ftms_reply.done():
+            self._ftms_reply.set_result(data[2])
+
+    def _on_ibd(self, _, data: bytearray) -> None:
+        r = P.parse_indoor_bike_data(bytes(data))
+        if not r:
+            return
+        if self.native:
+            # Power/cadence come from the Zwift riding-data stream; FTMS speed is
+            # still the real flywheel speed, which "derived" cadence needs.
+            self.session.on_trainer_data(wheel_kmh=r.speed_kmh)
+        else:
+            self.session.on_trainer_data(power=r.power, cadence=r.cadence, hr=r.hr, wheel_kmh=r.speed_kmh)
+
+    def _on_cps(self, _, data: bytearray) -> None:
+        if len(data) >= 4 and not self.native and not self.has_ftms:
+            self.session.on_trainer_data(power=int.from_bytes(data[2:4], "little", signed=True))
+
+    def _on_zwift_tx(self, _, data: bytearray) -> None:
+        log.debug("trainer <-(sync) %s", bytes(data).hex(" "))
+        if bytes(data[:6]) == P.RIDE_ON:
+            self._rideon.set()
+
+    def _on_zwift_async(self, _, data: bytearray) -> None:
+        if data and data[0] == P.OP_TRAINER_DATA:
+            r = P.parse_zwift_riding_data(bytes(data[1:]))
+            self.session.on_trainer_data(power=r.power, cadence=r.cadence, speed_kmh=r.speed_kmh, hr=r.hr)
+
+    # ---------- lifecycle
+
+    async def run(self) -> None:
+        st = self.session.state
+        while True:
+            st.trainer_status = f"connecting to {self.device.name or self.device.address}"
+            disconnected = asyncio.Event()
+            try:
+                async with BleakClient(self.device, disconnected_callback=lambda _: disconnected.set(),
+                                       timeout=20) as client:
+                    self.client = client
+                    await self._setup(client)
+                    st.trainer_status = f"connected: {self.device.name or self.device.address}"
+                    await self.session.on_trainer_ready(self)
+                    while not disconnected.is_set():
+                        try:
+                            await asyncio.wait_for(disconnected.wait(), 5)
+                        except asyncio.TimeoutError:
+                            if self.native and not st.erg:  # keep-alive, like Zwift does
+                                await self._zwift(P.zwift_simulation(self._grade, full=False))
+            except Exception as e:  # noqa: BLE001
+                log.warning("trainer: %s", e)
+            self.client, self.native, self._ftms_granted = None, False, False
+            st.trainer_status = "disconnected, retrying"
+            await asyncio.sleep(3)
+
+    async def _setup(self, client: BleakClient) -> None:
+        svc = client.services
+        has = lambda u: svc.get_characteristic(u) is not None  # noqa: E731
+        self.has_ftms = has(P.FTMS_CONTROL_POINT)
+        if has(P.FTMS_INDOOR_BIKE_DATA):
+            await client.start_notify(P.FTMS_INDOOR_BIKE_DATA, self._on_ibd)
+        if self.has_ftms:
+            await client.start_notify(P.FTMS_CONTROL_POINT, self._on_ftms_cp)
+        if has(P.CPS_MEASUREMENT):
+            await client.start_notify(P.CPS_MEASUREMENT, self._on_cps)
+        log.info("trainer services: FTMS=%s Zwift=%s", self.has_ftms, has(P.ZWIFT_SYNC_RX))
+
+        if self.session.cfg["trainer"]["mode"] == "ftms_erg" or not has(P.ZWIFT_SYNC_RX):
+            return
+        await client.start_notify(P.ZWIFT_ASYNC, self._on_zwift_async)
+        await client.start_notify(P.ZWIFT_SYNC_TX, self._on_zwift_tx)
+        for attempt in range(3):
+            self._rideon.clear()
+            await _write(client, P.ZWIFT_SYNC_RX, P.RIDE_ON_TRAINER)
+            try:
+                await asyncio.wait_for(self._rideon.wait(), 4)
+                break
+            except asyncio.TimeoutError:
+                log.info("trainer: no RideOn reply (attempt %d)", attempt + 1)
+        else:
+            log.warning("trainer ignored the Zwift handshake; falling back to FTMS")
+            return
+        self.native = True
+        r = self.session.cfg["rider"]
+        # Init sequence mirrors what Zwift sends (per TrainerHUD / Makinolo captures).
+        for msg in (P.UNKNOWN_41,
+                    P.zwift_gear(self.session.native_ratio(), r["bike_kg"], r["rider_kg"]),
+                    P.GET_DEVICE_INFO,
+                    P.zwift_simulation(self.session.state.grade_pct, full=True)):
+            await _write(client, P.ZWIFT_SYNC_RX, msg)
+            await asyncio.sleep(0.15)
+        log.info("trainer accepted RideOn: native virtual shifting active")
+
+
+# ===================================================================== controllers
+
+
+class BleController:
+    def __init__(self, session: Session, device: BLEDevice, kind: str):
+        self.session, self.device, self.kind = session, device, kind
+        self.label = f"{kind} {device.address[-5:]}"
+        self._pressed: set[str] = set()
+        self._rideon = asyncio.Event()
+        self._encrypted = False
+        c = session.cfg["controllers"]
+        self.actions = {**{b: "up" for b in c["shift_up"]}, **{b: "down" for b in c["shift_down"]},
+                        **{b: "erg" for b in c["toggle_erg"]}}
+
+    def _status(self, s: str) -> None:
+        self.session.state.controllers[self.label] = s
+
+    def _on_tx(self, _, data: bytearray) -> None:
+        d = bytes(data)
+        log.debug("%s <-(sync) %s", self.label, d.hex(" "))
+        if d[:6] == P.RIDE_ON:
+            # A reply carrying a 64-byte public key means old firmware that wants
+            # the encrypted (ECDH + AES-CCM) handshake, which isn't implemented.
+            self._encrypted = len(d) > 8
+            self._rideon.set()
+
+    def _on_async(self, _, data: bytearray) -> None:
+        pressed = P.controller_buttons(bytes(data))
+        if pressed is None:
+            return
+        for b in pressed - self._pressed:  # act on press edges only
+            act = self.actions.get(b)
+            log.debug("%s button %s -> %s", self.label, b, act)
+            if act == "up":
+                asyncio.create_task(self.session.shift(+1))
+            elif act == "down":
+                asyncio.create_task(self.session.shift(-1))
+            elif act == "erg":
+                asyncio.create_task(self.session.toggle_erg())
+        self._pressed = pressed
+
+    async def run(self) -> None:
+        while True:
+            self._status("connecting")
+            disconnected = asyncio.Event()
+            try:
+                async with BleakClient(self.device, disconnected_callback=lambda _: disconnected.set(),
+                                       timeout=20) as client:
+                    await client.start_notify(P.ZWIFT_ASYNC, self._on_async)
+                    await client.start_notify(P.ZWIFT_SYNC_TX, self._on_tx)
+                    self._rideon.clear()
+                    await _write(client, P.ZWIFT_SYNC_RX, P.RIDE_ON)
+                    try:
+                        await asyncio.wait_for(self._rideon.wait(), 5)
+                    except asyncio.TimeoutError:
+                        log.warning("%s: no RideOn reply", self.label)
+                    if self._encrypted:
+                        log.warning("%s wants the encrypted handshake; update its firmware in "
+                                    "Zwift Companion", self.label)
+                    if self.kind.startswith("click_v2") and self.session.cfg["controllers"]["click_v2_unlock"]:
+                        await _write(client, P.ZWIFT_SYNC_RX, P.CLICK_V2_UNLOCK)
+                    self._status("ready")
+                    log.info("%s ready", self.label)
+                    while not disconnected.is_set():
+                        try:
+                            await asyncio.wait_for(disconnected.wait(), 20)
+                        except asyncio.TimeoutError:
+                            await _write(client, P.ZWIFT_SYNC_RX, P.GET_DEVICE_INFO)  # keep-alive
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s: %s", self.label, e)
+            self._pressed.clear()
+            self._status("disconnected")
+            await asyncio.sleep(3)
+
+
+# ===================================================================== cadence sensor
+
+
+class BleCadenceSensor:
+    def __init__(self, session: Session, device: BLEDevice):
+        self.session, self.device = session, device
+        self._crank = P.CrankTracker()
+
+    def _on_csc(self, _, data: bytearray) -> None:
+        r = P.parse_csc_crank(bytes(data))
+        if r:
+            self.session.on_sensor_cadence(self._crank.update(*r))
+
+    async def run(self) -> None:
+        st = self.session.state
+        while True:
+            st.sensor_status = "connecting"
+            disconnected = asyncio.Event()
+            try:
+                async with BleakClient(self.device, disconnected_callback=lambda _: disconnected.set(),
+                                       timeout=20) as client:
+                    await client.start_notify(P.CSC_MEASUREMENT, self._on_csc)
+                    st.sensor_status = "connected"
+                    await disconnected.wait()
+            except Exception as e:  # noqa: BLE001
+                log.warning("cadence sensor: %s", e)
+            st.sensor_status = "disconnected"
+            await asyncio.sleep(3)
+
+
+# ===================================================================== discovery
+
+
+def _match(dev: BLEDevice, want_addr: str, want_name: str) -> bool:
+    if want_addr:
+        return dev.address.lower() == want_addr.lower()
+    return bool(want_name) and want_name.lower() in (dev.name or "").lower()
+
+
+async def discover_and_run(session: Session) -> None:
+    cfg = session.cfg
+    tcfg, ccfg, scfg = cfg["trainer"], cfg["controllers"], cfg["cadence_sensor"]
+    started: set[str] = set()
+    trainer_started = sensor_started = False
+    tasks: list[asyncio.Task] = []
+
+    def on_adv(dev: BLEDevice, adv: AdvertisementData) -> None:
+        nonlocal trainer_started, sensor_started
+        if dev.address in started:
+            return
+        uuids = [u.lower() for u in adv.service_uuids]
+        ztype = P.zwift_device_type(adv.manufacturer_data)
+
+        if not trainer_started:
+            explicit = tcfg["address"] or tcfg["name"]
+            is_trainer = (_match(dev, tcfg["address"], tcfg["name"]) if explicit
+                          else P.FTMS_SERVICE in uuids or ztype == "hub")
+            if is_trainer:
+                trainer_started = True
+                started.add(dev.address)
+                log.info("found trainer %s (%s)", dev.name, dev.address)
+                tasks.append(asyncio.create_task(BleTrainer(session, dev).run()))
+                return
+
+        if ccfg["enabled"] and ztype in CONTROLLER_TYPES:
+            if not ccfg["addresses"] or dev.address.lower() in [a.lower() for a in ccfg["addresses"]]:
+                started.add(dev.address)
+                log.info("found controller %s %s", ztype, dev.address)
+                tasks.append(asyncio.create_task(BleController(session, dev, ztype).run()))
+                return
+
+        if scfg["enabled"] and not sensor_started:
+            explicit = scfg["address"] or scfg["name"]
+            if (_match(dev, scfg["address"], scfg["name"]) if explicit else P.CSC_SERVICE in uuids):
+                sensor_started = True
+                started.add(dev.address)
+                log.info("found cadence sensor %s (%s)", dev.name, dev.address)
+                tasks.append(asyncio.create_task(BleCadenceSensor(session, dev).run()))
+
+    # Keep scanning for the whole session so a Click woken up later is picked up.
+    # (BlueZ allows connecting while a scan is running.)
+    async with BleakScanner(on_adv):
+        log.info("scanning... press a button on your Click to wake it")
+        await asyncio.Event().wait()
