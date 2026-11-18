@@ -42,6 +42,18 @@ gears:
 
 rider: {rider_kg: 75, bike_kg: 9}
 
+physics:
+  # Used when this app does the physics (trainer.mode: ftms_erg, the --simulate rider,
+  # and the speed shown in ftms_erg mode). Drag force = 0.5 * rho * cda * v^2.
+  cda: 0.32            # m^2; ~0.40 upright on the hoods, ~0.32 drops, ~0.25 aero bars
+  crr: 0.004           # also sent to the trainer
+  rho: 1.2             # air density, kg/m^3
+  drivetrain_eff: 0.97
+  wheel_circ_m: 2.105  # 700x28c
+  # Sent to the trainer, which does its own physics in native mode. Zwift uses 0.51;
+  # treat it as relative to that (e.g. 0.41 for ~20% less air resistance).
+  trainer_cwa: 0.51
+
 cadence:
   target: 90
   source: trainer       # trainer | sensor | derived

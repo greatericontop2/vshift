@@ -47,6 +47,10 @@ class BleTrainer:
         self._ftms_granted = False
         self._grade = 0.0
 
+    def _drag(self) -> dict:
+        ph = self.session.cfg["physics"]
+        return {"cwa": ph["trainer_cwa"], "crr": ph["crr"]}
+
     # ---------- Trainer protocol (called by Session)
 
     async def set_gear(self, ratio: float) -> None:
@@ -56,9 +60,10 @@ class BleTrainer:
     async def set_grade(self, grade_pct: float) -> None:
         self._grade = grade_pct
         if self.native:
-            await self._zwift(P.zwift_simulation(grade_pct, full=True))
+            await self._zwift(P.zwift_simulation(grade_pct, full=True, **self._drag()))
         elif self.has_ftms:
-            await self._ftms(P.ftms_simulation(grade_pct))
+            d = self._drag()
+            await self._ftms(P.ftms_simulation(grade_pct, crr=d["crr"], cw=d["cwa"]))
 
     async def set_erg(self, watts: int | None) -> None:
         if watts is None:
@@ -192,7 +197,7 @@ class BleTrainer:
         for msg in (P.UNKNOWN_41,
                     P.zwift_gear(self.session.native_ratio(), r["bike_kg"], r["rider_kg"]),
                     P.GET_DEVICE_INFO,
-                    P.zwift_simulation(self.session.state.grade_pct, full=True)):
+                    P.zwift_simulation(self.session.state.grade_pct, full=True, **self._drag())):
             await _write(client, P.ZWIFT_SYNC_RX, msg)
             await asyncio.sleep(0.15)
         log.info("trainer accepted RideOn: native virtual shifting active")

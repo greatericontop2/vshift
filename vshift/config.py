@@ -46,6 +46,10 @@ DEFAULTS = {
     "rider": {"rider_kg": 75.0, "bike_kg": 9.0},
     "physics": {  # used by ftms_erg mode and the ERG-emulated speed display
         "cda": 0.32, "crr": 0.004, "rho": 1.2, "drivetrain_eff": 0.97, "wheel_circ_m": 2.105,
+        # Drag coefficient sent to the trainer for its own physics (native mode and FTMS
+        # simulation). Zwift sends 0.51; the exact definition isn't documented, so treat
+        # it as relative: 0.41 is ~20% less air resistance than Zwift's default.
+        "trainer_cwa": 0.51,
     },
     "cadence": {
         "target": 90,

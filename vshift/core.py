@@ -51,8 +51,8 @@ class Session:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.ratios: list[float] = cfg["gears"]["ratios"]
-        self.physics = Physics(rider_kg=cfg["rider"]["rider_kg"], bike_kg=cfg["rider"]["bike_kg"],
-                               **cfg["physics"])
+        phys = {k: v for k, v in cfg["physics"].items() if k != "trainer_cwa"}
+        self.physics = Physics(rider_kg=cfg["rider"]["rider_kg"], bike_kg=cfg["rider"]["bike_kg"], **phys)
         s = self.state = State()
         s.gear_index = cfg["gears"]["start_index"]
         s.gear_count = len(self.ratios)

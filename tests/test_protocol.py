@@ -76,3 +76,15 @@ def test_config_example_loads():
     cfg = config.load("config.example.yaml")
     assert cfg["trainer"]["name"] == "D500"
     assert len(cfg["gears"]["ratios"]) > 30
+
+
+def test_cda_config_changes_physics(tmp_path):
+    from vshift.core import Session
+    f = tmp_path / "c.yaml"
+    f.write_text("physics: {cda: 0.25, trainer_cwa: 0.41}\n")
+    cfg = config.load(str(f))
+    s = Session(cfg)
+    assert s.physics.cda == 0.25
+    assert s.physics.power(10) < Session(config.load(None)).physics.power(10)
+    body = P.pb_decode(P.zwift_simulation(0, cwa=cfg["physics"]["trainer_cwa"])[1:])[0][2]
+    assert (3, 0, 4100) in P.pb_decode(body)
