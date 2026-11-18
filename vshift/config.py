@@ -21,9 +21,17 @@ DEFAULTS = {
     "controllers": {
         "enabled": True,
         "addresses": [],     # optional MACs; empty = any Zwift controller seen
-        "click_v2_unlock": True,
-        "shift_up": ["click_plus", "shift_up_right", "y", "up"],
-        "shift_down": ["click_minus", "shift_up_left", "z", "down"],
+        # Click v2 left pod only streams while Zwift's server-signed unlock is valid.
+        #   right_only    : ignore the left pod; map everything to right-side buttons
+        #   restart_left  : reboot the left pod every restart_left_s to get a fresh
+        #                   unlock window (left buttons drop out ~1-2 s per restart)
+        #   zwift_unlocked: you unlocked it in the Zwift app today; use both pods as-is
+        "click_v2_mode": "right_only",
+        "restart_left_s": 50,
+        # Right pod: + is shift_up_right; Y/Z/A/B are y/z/a/b. Left pod: d-pad up/down/
+        # left/right, - is shift_up_left. Click v1 sends click_plus/click_minus.
+        "shift_up": ["click_plus", "shift_up_right"],
+        "shift_down": ["click_minus", "b"],
         "toggle_erg": ["a"],
     },
     "cadence_sensor": {"enabled": False, "name": "", "address": ""},
@@ -90,4 +98,20 @@ def load(path: str | None) -> dict:
         raise ValueError("trainer.mode must be auto, native or ftms_erg")
     if cfg["cadence"]["source"] not in ("trainer", "sensor", "derived"):
         raise ValueError("cadence.source must be trainer, sensor or derived")
+    c = cfg["controllers"]
+    if c["click_v2_mode"] not in CLICK_V2_MODES:
+        raise ValueError("controllers.click_v2_mode must be one of " + ", ".join(CLICK_V2_MODES))
     return cfg
+
+
+CLICK_V2_MODES = ("right_only", "restart_left", "zwift_unlocked")
+# Buttons reported by the left side of a Click v2 (separate pod) or Zwift Ride.
+LEFT_BUTTONS = {"left", "up", "right", "down", "shift_up_left", "shift_down_left",
+                "powerup_left", "onoff_left"}
+
+
+def mapped_left_buttons(cfg: dict) -> dict[str, list[str]]:
+    """{action: [left-side buttons mapped to it]} for actions that use any."""
+    c = cfg["controllers"]
+    out = {a: [b for b in c[a] if b in LEFT_BUTTONS] for a in ("shift_up", "shift_down", "toggle_erg")}
+    return {a: bs for a, bs in out.items() if bs}

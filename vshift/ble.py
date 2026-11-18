@@ -202,18 +202,32 @@ class BleTrainer:
 
 
 class BleController:
+    ACK_INTERVAL_S = 15      # harmless no-solver ack, as zwiftboard does
+    KEEPALIVE_S = 20
+    RESET_GRACE_S = 15       # if the pod doesn't drop after 0x18, reconnect ourselves
+    QUIET_BEFORE_RESET_S = 1.5  # don't reboot the pod in the middle of a press
+
     def __init__(self, session: Session, device: BLEDevice, kind: str):
         self.session, self.device, self.kind = session, device, kind
         self.label = f"{kind} {device.address[-5:]}"
         self._pressed: set[str] = set()
         self._rideon = asyncio.Event()
         self._encrypted = False
+        self._client: BleakClient | None = None
+        self._last_press = 0.0
         c = session.cfg["controllers"]
+        self.click_v2 = kind.startswith("click_v2")
+        self.restart_left = kind == "click_v2_left" and c["click_v2_mode"] == "restart_left"
         self.actions = {**{b: "up" for b in c["shift_up"]}, **{b: "down" for b in c["shift_down"]},
                         **{b: "erg" for b in c["toggle_erg"]}}
 
     def _status(self, s: str) -> None:
         self.session.state.controllers[self.label] = s
+
+    def _send(self, data: bytes) -> None:
+        """Fire-and-forget write from a notification callback."""
+        if self._client is not None:
+            asyncio.create_task(_write(self._client, P.ZWIFT_SYNC_RX, data))
 
     def _on_tx(self, _, data: bytearray) -> None:
         d = bytes(data)
@@ -221,13 +235,23 @@ class BleController:
         if d[:6] == P.RIDE_ON:
             # A reply carrying a 64-byte public key means old firmware that wants
             # the encrypted (ECDH + AES-CCM) handshake, which isn't implemented.
-            self._encrypted = len(d) > 8
+            self._encrypted = len(d) > 8 and not self.click_v2
             self._rideon.set()
 
     def _on_async(self, _, data: bytearray) -> None:
-        pressed = P.controller_buttons(bytes(data))
+        d = bytes(data)
+        if P.is_unlock_challenge(d):
+            # A locked pod answers the handshake with a challenge instead of RideOn.
+            # We can't produce Zwift's signed reply; the bare ack is the fallback.
+            log.debug("%s unlock challenge %s", self.label, d.hex(" "))
+            self._rideon.set()
+            self._send(P.CLICK_V2_ACK)
+            return
+        pressed = P.controller_buttons(d)
         if pressed is None:
             return
+        if pressed:
+            self._last_press = time.monotonic()
         for b in pressed - self._pressed:  # act on press edges only
             act = self.actions.get(b)
             log.debug("%s button %s -> %s", self.label, b, act)
@@ -239,38 +263,77 @@ class BleController:
                 asyncio.create_task(self.session.toggle_erg())
         self._pressed = pressed
 
+    async def _handshake(self, client: BleakClient) -> None:
+        self._rideon.clear()
+        if self.click_v2:
+            for frame in P.CLICK_V2_ACTIVATION:
+                await _write(client, P.ZWIFT_SYNC_RX, frame)
+                await asyncio.sleep(0.1)
+        else:
+            await _write(client, P.ZWIFT_SYNC_RX, P.RIDE_ON)
+        try:
+            await asyncio.wait_for(self._rideon.wait(), 5)
+        except asyncio.TimeoutError:
+            log.warning("%s: no RideOn reply", self.label)
+        if self._encrypted:
+            log.warning("%s wants the encrypted handshake; update its firmware in "
+                        "Zwift Companion", self.label)
+
+    async def _session(self, client: BleakClient, disconnected: asyncio.Event) -> bool:
+        """Runs one connection. Returns True if it ended because we rebooted the pod."""
+        connected_at = last_ack = last_keep = time.monotonic()
+        reset_at = None
+        while not disconnected.is_set():
+            try:
+                await asyncio.wait_for(disconnected.wait(), 1)
+                break
+            except asyncio.TimeoutError:
+                pass
+            now = time.monotonic()
+            if reset_at is not None:
+                if now - reset_at > self.RESET_GRACE_S:
+                    log.info("%s didn't drop after reset; reconnecting", self.label)
+                    break
+                continue
+            if self.restart_left:
+                left = self.session.cfg["controllers"]["restart_left_s"] - (now - connected_at)
+                self._status(f"ready, restart in {max(0, left):.0f}s")
+                if left <= 0 and now - self._last_press >= self.QUIET_BEFORE_RESET_S:
+                    log.info("%s: scheduled reboot for a fresh unlock window", self.label)
+                    await _write(client, P.ZWIFT_SYNC_RX, P.CLICK_V2_RESET)
+                    self._status("restarting")
+                    reset_at = now
+                    continue
+            if self.click_v2 and now - last_ack >= self.ACK_INTERVAL_S:
+                await _write(client, P.ZWIFT_SYNC_RX, P.CLICK_V2_ACK)
+                last_ack = now
+            if now - last_keep >= self.KEEPALIVE_S:
+                await _write(client, P.ZWIFT_SYNC_RX, P.GET_DEVICE_INFO)
+                last_keep = now
+        return reset_at is not None
+
     async def run(self) -> None:
         while True:
             self._status("connecting")
             disconnected = asyncio.Event()
+            planned = False
             try:
                 async with BleakClient(self.device, disconnected_callback=lambda _: disconnected.set(),
                                        timeout=20) as client:
+                    self._client = client
                     await client.start_notify(P.ZWIFT_ASYNC, self._on_async)
                     await client.start_notify(P.ZWIFT_SYNC_TX, self._on_tx)
-                    self._rideon.clear()
-                    await _write(client, P.ZWIFT_SYNC_RX, P.RIDE_ON)
-                    try:
-                        await asyncio.wait_for(self._rideon.wait(), 5)
-                    except asyncio.TimeoutError:
-                        log.warning("%s: no RideOn reply", self.label)
-                    if self._encrypted:
-                        log.warning("%s wants the encrypted handshake; update its firmware in "
-                                    "Zwift Companion", self.label)
-                    if self.kind.startswith("click_v2") and self.session.cfg["controllers"]["click_v2_unlock"]:
-                        await _write(client, P.ZWIFT_SYNC_RX, P.CLICK_V2_UNLOCK)
+                    await self._handshake(client)
                     self._status("ready")
                     log.info("%s ready", self.label)
-                    while not disconnected.is_set():
-                        try:
-                            await asyncio.wait_for(disconnected.wait(), 20)
-                        except asyncio.TimeoutError:
-                            await _write(client, P.ZWIFT_SYNC_RX, P.GET_DEVICE_INFO)  # keep-alive
+                    planned = await self._session(client, disconnected)
             except Exception as e:  # noqa: BLE001
                 log.warning("%s: %s", self.label, e)
+            self._client = None
             self._pressed.clear()
-            self._status("disconnected")
-            await asyncio.sleep(3)
+            self._status("restarting" if planned else "disconnected")
+            # After a planned reboot the pod re-advertises within a second or two.
+            await asyncio.sleep(0.5 if planned else 3)
 
 
 # ===================================================================== cadence sensor
@@ -336,6 +399,11 @@ async def discover_and_run(session: Session) -> None:
                 log.info("found trainer %s (%s)", dev.name, dev.address)
                 tasks.append(asyncio.create_task(BleTrainer(session, dev).run()))
                 return
+
+        if ccfg["enabled"] and ztype == "click_v2_left" and ccfg["click_v2_mode"] == "right_only":
+            started.add(dev.address)  # mark as seen so we only log this once
+            log.info("ignoring Click v2 left pod %s (click_v2_mode: right_only)", dev.address)
+            return
 
         if ccfg["enabled"] and ztype in CONTROLLER_TYPES:
             if not ccfg["addresses"] or dev.address.lower() in [a.lower() for a in ccfg["addresses"]]:

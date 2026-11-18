@@ -137,6 +137,12 @@ def main(argv=None) -> int:
         log.addHandler(h)
     log.setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
+    if cfg["controllers"]["enabled"] and cfg["controllers"]["click_v2_mode"] == "right_only":
+        for action, buttons in config.mapped_left_buttons(cfg).items():
+            log.warning("controllers.%s uses left-side button(s) %s, which won't work in "
+                        "click_v2_mode: right_only (Click v2 left pod is ignored; a Zwift Ride's "
+                        "left side needs the Zwift unlock)", action, ", ".join(buttons))
+
     session = Session(cfg)
     log.info("%d gears, %.2f..%.2f, start gear %d", len(session.ratios), session.ratios[0],
              session.ratios[-1], session.state.gear_index + 1)

@@ -43,7 +43,18 @@ ZWIFT_DEVICE_TYPES = {
 
 RIDE_ON = b"RideOn"
 RIDE_ON_TRAINER = RIDE_ON + bytes([0x02, 0x01])
-CLICK_V2_UNLOCK = bytes([0xFF, 0x04, 0x00])
+# Click v2 (see github.com/thomaschampagne/zwiftboard internal/zwift/protocol.go):
+# activation is RideOn+02 03, 00 08 00, 00 08 10. The left pod then sends an
+# FF 03 <challenge> on the async characteristic; Zwift answers ff 04 00 <signed
+# reply from Zwift's servers>. The bare ff 04 00 ack does NOT unlock the left pod,
+# it only keeps an already-unlocked pod streaming. A lone 0x18 reboots a pod.
+CLICK_V2_ACTIVATION = (RIDE_ON + bytes([0x02, 0x03]), bytes([0x00, 0x08, 0x00]), bytes([0x00, 0x08, 0x10]))
+CLICK_V2_ACK = bytes([0xFF, 0x04, 0x00])
+CLICK_V2_RESET = bytes([0x18])
+
+
+def is_unlock_challenge(frame: bytes) -> bool:
+    return frame[:2] == b"\xff\x03"
 GET_DEVICE_INFO = bytes([0x00, 0x08, 0x00])  # also used as controller keep-alive
 UNKNOWN_41 = bytes([0x41, 0x08, 0x05])       # sent by Zwift during trainer init
 

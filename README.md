@@ -57,8 +57,16 @@ use `sensor` or `derived` there.
 ## Limitations
 
 - Only one app can control the trainer at a time. Close Zwift / phone apps first.
-- Click v2 needs the daily unlock from the Zwift Companion/Zwift app (open it once,
-  pair, close). The app sends the known unlock frame but cannot replace that.
+- Click v2: only the right pod works freely. The left pod sends presses only while
+  an unlock signed by Zwift's servers is valid; the bare `ff 04 00` ack this app
+  sends does not unlock it. Pick `controllers.click_v2_mode`:
+  - `right_only` (default): ignore the left pod, + shifts up, B shifts down. Mapping a
+    left-pod button prints a warning.
+  - `restart_left`: reboot the left pod (a lone `0x18` write) every `restart_left_s`
+    seconds so it gets a fresh unlock window, like BikeControl does. Left presses
+    during the 1-2 s reboot are lost; the reboot waits until no button is held.
+  - `zwift_unlocked`: you connected the Click in the Zwift app (no subscription needed)
+    within the last ~24 h, so both pods just work.
 - Click v1 on old firmware uses an encrypted handshake that isn't implemented; update
   the firmware via Zwift Companion.
 - Whether Van Rysel trainers accept the native Zwift gear commands is unverified
