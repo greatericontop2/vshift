@@ -191,15 +191,35 @@ def main(argv=None) -> int:
             tasks.append(asyncio.create_task(discover_and_run(session)))
         try:
             await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            pass
         except Exception:  # noqa: BLE001
             log.exception("worker crashed")
 
-    t = threading.Thread(target=lambda: loop.run_until_complete(worker()), daemon=True)
+    worker_task: list[asyncio.Task] = []
+
+    def run_loop():
+        worker_task.append(loop.create_task(worker()))
+        loop.run_until_complete(worker_task[0])
+
+    def shutdown():
+        # Cancel the worker so BLE links are closed; otherwise bluetoothd keeps them
+        # up after we exit and the devices stop advertising until disconnected.
+        if worker_task and t.is_alive():
+            loop.call_soon_threadsafe(worker_task[0].cancel)
+            t.join(5)
+
+    t = threading.Thread(target=run_loop, daemon=True)
     t.start()
-    root = tk.Tk()
-    root.geometry("1280x720")
-    Gui(root, session, loop, logq)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        root.geometry("1280x720")
+        Gui(root, session, loop, logq)
+        root.mainloop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        shutdown()
     return 0
 
 

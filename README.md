@@ -27,7 +27,9 @@ directly. If you already paired the trainer or Click there, remove it
    phone, so nothing else holds the trainer or the Click.
 3. Start pedalling to wake the trainer, and press a button on each Click pod (its LED
    blinks while advertising).
-4. `vshift --scan` lists what the app can see. Put the trainer's name (or MAC) into
+4. `vshift --scan` lists what the app can see, plus any device still connected from an
+   earlier run (connected devices don't advertise; vshift drops those links on start,
+   or use `bluetoothctl disconnect <MAC>`). Put the trainer's name (or MAC) into
    `trainer.name` / `trainer.address`.
 
 ## Run

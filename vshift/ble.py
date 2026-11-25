@@ -449,8 +449,39 @@ async def discover_and_run(session: Session) -> None:
     # Keep scanning for the whole session so a Click woken up later is picked up.
     # Some adapters silently stop LE scanning while they connect to another device,
     # so the scan is restarted every SCAN_RESTART_S seconds.
+    await _drop_leftover_connections()
     log.info("scanning... press a button on each Click pod to wake it")
     last_hint = time.monotonic()
+    try:
+        await _scan_forever(on_adv, ccfg, zwift_seen, lambda: adv_count, last_hint)
+    finally:
+        # Cancel device tasks so each `async with BleakClient` disconnects cleanly;
+        # otherwise bluetoothd keeps the links up after we exit.
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        log.info("disconnected all devices")
+
+
+async def _drop_leftover_connections() -> None:
+    from . import bluez
+    try:
+        devs = await bluez.connected_devices()
+    except Exception as e:  # noqa: BLE001
+        log.debug("couldn't list BlueZ connections: %s", e)
+        return
+    for d in devs:
+        if d.kind:
+            log.info("dropping leftover connection to %s %s (%s)", d.kind, d.address, d.name or "no name")
+            try:
+                await bluez.disconnect(d.path)
+            except Exception as e:  # noqa: BLE001
+                log.warning("couldn't disconnect %s: %s", d.address, e)
+    if any(d.kind for d in devs):
+        await asyncio.sleep(1.5)  # give devices a moment to start advertising again
+
+
+async def _scan_forever(on_adv, ccfg, zwift_seen, adv_count, last_hint) -> None:
     while True:
         try:
             async with BleakScanner(on_adv):
@@ -458,12 +489,12 @@ async def discover_and_run(session: Session) -> None:
         except Exception as e:  # noqa: BLE001  (e.g. InProgress while a connect is running)
             log.debug("scan restart failed: %s", e)
             await asyncio.sleep(2)
-        log.debug("scan cycle done, %d advertisements so far", adv_count)
+        log.debug("scan cycle done, %d advertisements so far", adv_count())
         if ccfg["enabled"] and not any(t in CONTROLLER_TYPES for t in zwift_seen.values()) \
                 and time.monotonic() - last_hint > 30:
             last_hint = time.monotonic()
             log.info("no Zwift controller seen yet (%d advertisements received); press a "
-                     "button on each pod, and make sure no phone/app is connected to it", adv_count)
+                     "button on each pod, and make sure no phone/app is connected to it", adv_count())
 
 
 # ===================================================================== --scan
@@ -493,6 +524,14 @@ async def scan(seconds: float = 15) -> None:
                 print(f"{dev.address}  rssi {adv.rssi:4}  {row[0]!r:28} {row[1]}", flush=True)
             seen[dev.address] = row
 
+    from . import bluez
+    try:
+        held = [d for d in await bluez.connected_devices() if d.kind]
+    except Exception:  # noqa: BLE001
+        held = []
+    for d in held:
+        print(f"{d.address}  already connected in BlueZ, so not advertising: {d.kind} {d.name!r}"
+              " (vshift drops this on start; or: bluetoothctl disconnect " + d.address + ")")
     print(f"scanning for {seconds:.0f} s -- press a button on each Click pod to wake it")
     async with BleakScanner(on_adv):
         await asyncio.sleep(seconds)
