@@ -19,6 +19,7 @@ from .core import Session
 
 log = logging.getLogger("vshift")
 
+SCAN_RESTART_S = 10
 CONTROLLER_TYPES = {"click_v1", "click_v2_left", "click_v2_right", "play_left", "play_right",
                     "play", "ride_left", "ride_right"}
 
@@ -399,13 +400,19 @@ async def discover_and_run(session: Session) -> None:
     started: set[str] = set()
     trainer_started = sensor_started = False
     tasks: list[asyncio.Task] = []
+    zwift_seen: dict[str, str] = {}  # address -> type, for diagnostics
+    adv_count = 0
 
     def on_adv(dev: BLEDevice, adv: AdvertisementData) -> None:
-        nonlocal trainer_started, sensor_started
-        if dev.address in started:
-            return
+        nonlocal trainer_started, sensor_started, adv_count
+        adv_count += 1
         uuids = [u.lower() for u in adv.service_uuids]
         ztype = P.zwift_device_type(adv.manufacturer_data)
+        if ztype and zwift_seen.get(dev.address) != ztype:
+            zwift_seen[dev.address] = ztype
+            log.info("seen Zwift device %s %s (rssi %s)", ztype, dev.address, adv.rssi)
+        if dev.address in started:
+            return
 
         if not trainer_started:
             explicit = tcfg["address"] or tcfg["name"]
@@ -418,12 +425,18 @@ async def discover_and_run(session: Session) -> None:
                 tasks.append(asyncio.create_task(BleTrainer(session, dev).run()))
                 return
 
-        if ccfg["enabled"] and ztype in CONTROLLER_TYPES:
-            if not ccfg["addresses"] or dev.address.lower() in [a.lower() for a in ccfg["addresses"]]:
+        if ztype in CONTROLLER_TYPES:
+            if not ccfg["enabled"]:
+                started.add(dev.address)
+                log.info("not using %s %s: controllers.enabled is false", ztype, dev.address)
+            elif ccfg["addresses"] and dev.address.lower() not in [a.lower() for a in ccfg["addresses"]]:
+                started.add(dev.address)
+                log.info("not using %s %s: not in controllers.addresses", ztype, dev.address)
+            else:
                 started.add(dev.address)
                 log.info("found controller %s %s", ztype, dev.address)
                 tasks.append(asyncio.create_task(BleController(session, dev, ztype).run()))
-                return
+            return
 
         if scfg["enabled"] and not sensor_started:
             explicit = scfg["address"] or scfg["name"]
@@ -434,10 +447,23 @@ async def discover_and_run(session: Session) -> None:
                 tasks.append(asyncio.create_task(BleCadenceSensor(session, dev).run()))
 
     # Keep scanning for the whole session so a Click woken up later is picked up.
-    # (BlueZ allows connecting while a scan is running.)
-    async with BleakScanner(on_adv):
-        log.info("scanning... press a button on your Click to wake it")
-        await asyncio.Event().wait()
+    # Some adapters silently stop LE scanning while they connect to another device,
+    # so the scan is restarted every SCAN_RESTART_S seconds.
+    log.info("scanning... press a button on each Click pod to wake it")
+    last_hint = time.monotonic()
+    while True:
+        try:
+            async with BleakScanner(on_adv):
+                await asyncio.sleep(SCAN_RESTART_S)
+        except Exception as e:  # noqa: BLE001  (e.g. InProgress while a connect is running)
+            log.debug("scan restart failed: %s", e)
+            await asyncio.sleep(2)
+        log.debug("scan cycle done, %d advertisements so far", adv_count)
+        if ccfg["enabled"] and not any(t in CONTROLLER_TYPES for t in zwift_seen.values()) \
+                and time.monotonic() - last_hint > 30:
+            last_hint = time.monotonic()
+            log.info("no Zwift controller seen yet (%d advertisements received); press a "
+                     "button on each pod, and make sure no phone/app is connected to it", adv_count)
 
 
 # ===================================================================== --scan
