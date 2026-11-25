@@ -8,7 +8,8 @@ trainer:
 controllers:
   enabled: true
   # The Click v2 left pod only sends presses while a Zwift-server-signed unlock is valid.
-  #   right_only     - ignore the left pod; use right-pod buttons only (no unlock ever)
+  #   right_only     - use right-pod buttons only (no unlock ever); the left pod still
+  #                    has to be on, since it carries the pair's Bluetooth link
   #   restart_left   - reboot the left pod every restart_left_s seconds so it gets a fresh
   #                    ~1 min window; left presses during the 1-2 s reboot are lost
   #   zwift_unlocked - you unlocked it in the Zwift app in the last ~24 h; use both pods

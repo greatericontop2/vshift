@@ -15,6 +15,21 @@ first time.
     pip install -e .
     cp config.example.yaml config.yaml   # edit name / gears
 
+## First connection
+
+No pairing in Ubuntu's Bluetooth settings is needed; the app talks to the devices
+directly. If you already paired the trainer or Click there, remove it
+(`bluetoothctl remove <MAC>`), since BlueZ may auto-connect it and hide it from the app.
+
+1. `bluetoothctl show` should say `Powered: yes` (if not: `rfkill unblock bluetooth`,
+   `bluetoothctl power on`).
+2. Close Zwift / Zwift Companion / other trainer apps and turn off Bluetooth on your
+   phone, so nothing else holds the trainer or the Click.
+3. Start pedalling to wake the trainer, and press a button on each Click pod (its LED
+   blinks while advertising).
+4. `vshift --scan` lists what the app can see. Put the trainer's name (or MAC) into
+   `trainer.name` / `trainer.address`.
+
 ## Run
 
     vshift -c config.yaml               # real hardware
@@ -67,7 +82,8 @@ use `sensor` or `derived` there.
 - Click v2: only the right pod works freely. The left pod sends presses only while
   an unlock signed by Zwift's servers is valid; the bare `ff 04 00` ack this app
   sends does not unlock it. Pick `controllers.click_v2_mode`:
-  - `right_only` (default): ignore the left pod, + shifts up, B shifts down. Mapping a
+  - `right_only` (default): + shifts up, B shifts down. Keep both pods on: the left
+    pod stays connected because it carries the pair's link, but its buttons are ignored. Mapping a
     left-pod button prints a warning.
   - `restart_left`: reboot the left pod (a lone `0x18` write) every `restart_left_s`
     seconds so it gets a fresh unlock window, like BikeControl does. Left presses

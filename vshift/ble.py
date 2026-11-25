@@ -14,6 +14,7 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
 from . import protocol as P
+from .config import LEFT_BUTTONS
 from .core import Session
 
 log = logging.getLogger("vshift")
@@ -223,6 +224,16 @@ class BleController:
         c = session.cfg["controllers"]
         self.click_v2 = kind.startswith("click_v2")
         self.restart_left = kind == "click_v2_left" and c["click_v2_mode"] == "restart_left"
+        # The Click v2 left pod is the pair's BLE anchor: it relays the right pod's
+        # presses as well as its own, so each pod only acts on its own side's buttons
+        # (otherwise one press would shift twice). In right_only mode the left pod
+        # stays connected to keep the pair's link up, but none of its buttons act.
+        if kind == "click_v2_left":
+            self.own = set() if c["click_v2_mode"] == "right_only" else set(LEFT_BUTTONS)
+        elif kind == "click_v2_right":
+            self.own = set(P.RIDE_BITS) - LEFT_BUTTONS
+        else:
+            self.own = None  # Click v1 / Play / Ride: accept everything
         self.actions = {**{b: "up" for b in c["shift_up"]}, **{b: "down" for b in c["shift_down"]},
                         **{b: "erg" for b in c["toggle_erg"]}}
 
@@ -255,6 +266,8 @@ class BleController:
         pressed = P.controller_buttons(d)
         if pressed is None:
             return
+        if self.own is not None:
+            pressed &= self.own
         if pressed:
             self._last_press = time.monotonic()
         for b in pressed - self._pressed:  # act on press edges only
@@ -329,7 +342,7 @@ class BleController:
                     await client.start_notify(P.ZWIFT_ASYNC, self._on_async)
                     await client.start_notify(P.ZWIFT_SYNC_TX, self._on_tx)
                     await self._handshake(client)
-                    self._status("ready")
+                    self._status("ready" if self.own != set() else "connected (link only)")
                     log.info("%s ready", self.label)
                     planned = await self._session(client, disconnected)
             except Exception as e:  # noqa: BLE001
@@ -405,11 +418,6 @@ async def discover_and_run(session: Session) -> None:
                 tasks.append(asyncio.create_task(BleTrainer(session, dev).run()))
                 return
 
-        if ccfg["enabled"] and ztype == "click_v2_left" and ccfg["click_v2_mode"] == "right_only":
-            started.add(dev.address)  # mark as seen so we only log this once
-            log.info("ignoring Click v2 left pod %s (click_v2_mode: right_only)", dev.address)
-            return
-
         if ccfg["enabled"] and ztype in CONTROLLER_TYPES:
             if not ccfg["addresses"] or dev.address.lower() in [a.lower() for a in ccfg["addresses"]]:
                 started.add(dev.address)
@@ -430,3 +438,41 @@ async def discover_and_run(session: Session) -> None:
     async with BleakScanner(on_adv):
         log.info("scanning... press a button on your Click to wake it")
         await asyncio.Event().wait()
+
+
+# ===================================================================== --scan
+
+
+async def scan(seconds: float = 15) -> None:
+    """Print every BLE device seen, flagging trainers, Zwift controllers and sensors."""
+    seen: dict[str, tuple] = {}
+
+    def on_adv(dev: BLEDevice, adv: AdvertisementData) -> None:
+        uuids = [u.lower() for u in adv.service_uuids]
+        kinds = []
+        if P.FTMS_SERVICE in uuids:
+            kinds.append("FTMS trainer")
+        if P.ZWIFT_SERVICE in uuids or P.ZWIFT_SERVICE_FC82 in uuids:
+            kinds.append("Zwift service")
+        zt = P.zwift_device_type(adv.manufacturer_data)
+        if zt:
+            kinds.append(f"zwift:{zt}")
+        if P.CSC_SERVICE in uuids:
+            kinds.append("cadence sensor")
+        if P.CPS_SERVICE in uuids:
+            kinds.append("power meter")
+        row = (dev.name or adv.local_name or "", ", ".join(kinds))
+        if seen.get(dev.address) != row:
+            if dev.address not in seen or kinds:
+                print(f"{dev.address}  rssi {adv.rssi:4}  {row[0]!r:28} {row[1]}", flush=True)
+            seen[dev.address] = row
+
+    print(f"scanning for {seconds:.0f} s -- press a button on each Click pod to wake it")
+    async with BleakScanner(on_adv):
+        await asyncio.sleep(seconds)
+    hits = {a: r for a, r in seen.items() if r[1]}
+    print(f"\n{len(seen)} devices, {len(hits)} relevant:")
+    for a, (name, kinds) in hits.items():
+        print(f"  {a}  {name!r:28} {kinds}")
+    if not any("zwift:click" in k or "zwift:ride" in k or "zwift:play" in k for _, k in hits.values()):
+        print("  no Zwift controller seen: is it awake, and not connected to another app or phone?")

@@ -106,3 +106,44 @@ def test_speed_units_validated(tmp_path):
     f.write_text("display: {speed_units: furlongs}\n")
     with pytest.raises(ValueError):
         config.load(str(f))
+
+
+def presses(kind, mode, buttons, mapping=None):
+    """Feed one 0x23 frame with `buttons` held; return the shift deltas applied."""
+    cfg = make_cfg(click_v2_mode=mode, **(mapping or {}))
+    s = Session(cfg)
+    shifts = []
+
+    async def fake_shift(d):
+        shifts.append(d)
+    s.shift = fake_shift
+
+    async def go():
+        c = ble.BleController(s, SimpleNamespace(address="AA:BB:CC:DD:EE:FF"), kind)
+        bitmap = 0xFFFFFFFF
+        for b in buttons:
+            bitmap &= ~P.RIDE_BITS[b]  # 0 bit = pressed
+        c._on_async(None, bytearray([P.OP_CONTROLLER]) + P.pb_uint(1, bitmap))
+        await asyncio.sleep(0)
+    asyncio.run(go())
+    return shifts
+
+
+both = {"shift_down": ["b", "shift_up_left"]}
+
+
+def test_right_press_relayed_by_left_pod_not_doubled():
+    # The left pod relays right-pod presses; only the right pod should act on them.
+    assert presses("click_v2_right", "zwift_unlocked", ["shift_up_right"]) == [1]
+    assert presses("click_v2_left", "zwift_unlocked", ["shift_up_right"]) == []
+
+
+def test_left_pod_buttons_by_mode():
+    assert presses("click_v2_left", "zwift_unlocked", ["shift_up_left"], both) == [-1]
+    assert presses("click_v2_left", "restart_left", ["shift_up_left"], both) == [-1]
+    assert presses("click_v2_left", "right_only", ["shift_up_left"], both) == []
+    assert presses("click_v2_right", "zwift_unlocked", ["shift_up_left"], both) == []
+
+
+def test_other_controllers_unfiltered():
+    assert presses("ride_left", "right_only", ["shift_up_left"], both) == [-1]

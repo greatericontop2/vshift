@@ -146,7 +146,19 @@ def main(argv=None) -> int:
     ap.add_argument("--sim-watts", type=float, default=220, help="simulated rider power (SIM mode)")
     ap.add_argument("--sim-cadence", type=float, default=90, help="simulated cadence in ERG mode")
     ap.add_argument("-v", "--verbose", action="store_true", help="log raw BLE traffic")
+    ap.add_argument("--scan", nargs="?", type=float, const=15, metavar="SECONDS",
+                    help="list nearby Bluetooth devices and exit (default 15 s)")
     args = ap.parse_args(argv)
+
+    if args.scan:
+        from .ble import scan
+        try:
+            asyncio.run(scan(args.scan))
+        except Exception as e:  # noqa: BLE001
+            print(f"Bluetooth unavailable ({type(e).__name__}: {e}); is bluetoothd running "
+                  "and the adapter powered on?", file=sys.stderr)
+            return 1
+        return 0
 
     cfg = config.load(args.config)
     logq: queue.Queue = queue.Queue()
@@ -159,7 +171,7 @@ def main(argv=None) -> int:
     if cfg["controllers"]["enabled"] and cfg["controllers"]["click_v2_mode"] == "right_only":
         for action, buttons in config.mapped_left_buttons(cfg).items():
             log.warning("controllers.%s uses left-side button(s) %s, which won't work in "
-                        "click_v2_mode: right_only (Click v2 left pod is ignored; a Zwift Ride's "
+                        "click_v2_mode: right_only (the Click v2 left pod's buttons are ignored; a Zwift Ride's "
                         "left side needs the Zwift unlock)", action, ", ".join(buttons))
 
     session = Session(cfg)

@@ -22,7 +22,7 @@ DEFAULTS = {
         "enabled": True,
         "addresses": [],     # optional MACs; empty = any Zwift controller seen
         # Click v2 left pod only streams while Zwift's server-signed unlock is valid.
-        #   right_only    : ignore the left pod; map everything to right-side buttons
+        #   right_only    : left pod stays connected (it carries the pair's link) but its buttons are ignored
         #   restart_left  : reboot the left pod every restart_left_s to get a fresh
         #                   unlock window (left buttons drop out ~1-2 s per restart)
         #   zwift_unlocked: you unlocked it in the Zwift app today; use both pods as-is
